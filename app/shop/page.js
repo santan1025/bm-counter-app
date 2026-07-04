@@ -3,7 +3,10 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase';
 import { getMyProfile, fmt, todayStr } from '@/lib/helpers';
-import { colors, card, btnPrimary, btnOutline } from '@/lib/styles';
+import { colors, card, btnPrimary, btnOutline, input } from '@/lib/styles';
+import { addCreditSale, lookupCreditHint } from '@/lib/credit';
+
+const PAY_MODES = ['cash', 'upi', 'card', 'credit', 'split'];
 
 export default function ShopPage() {
   const router = useRouter();
@@ -14,9 +17,19 @@ export default function ShopPage() {
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]); // [{id, name, price, qty}]
   const [payMode, setPayMode] = useState('cash');
+  const [disc, setDisc] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
+
+  // Credit fields
+  const [crName, setCrName] = useState('');
+  const [crPhone, setCrPhone] = useState('');
+  const [crHint, setCrHint] = useState(null);
+
+  // Split fields
+  const [spU, setSpU] = useState('');
+  const [spC, setSpC] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -62,29 +75,73 @@ export default function ShopPage() {
       .filter(c => c.qty > 0));
   }
 
-  const cartTotal = cart.reduce((a, c) => a + c.price * c.qty, 0);
+  const sub = cart.reduce((a, c) => a + c.price * c.qty, 0);
+  const cartTotal = Math.max(0, sub - (parseInt(disc) || 0));
+
+  // As staff types a phone number for a credit sale, warn if this customer
+  // already has an outstanding balance — same as v15's lookupCreditCustomer.
+  async function handlePhoneChange(val) {
+    setCrPhone(val);
+    if (val.length >= 6 && profile) {
+      setCrHint(await lookupCreditHint(supabase, profile.shop_id, val));
+    } else {
+      setCrHint(null);
+    }
+  }
+
+  function resetPaymentFields() {
+    setCrName(''); setCrPhone(''); setCrHint(null);
+    setSpU(''); setSpC('');
+  }
 
   async function confirmSale() {
     if (!cart.length) { setMsg('Cart is empty'); return; }
+
+    if (payMode === 'credit' && !crName.trim()) {
+      setMsg('Enter customer name for credit sale');
+      return;
+    }
+    if (payMode === 'split') {
+      const u = parseInt(spU) || 0, c = parseInt(spC) || 0;
+      if (u + c !== cartTotal && cartTotal > 0) {
+        if (!confirm(`Split ₹${u + c} ≠ Total ₹${cartTotal}. Save anyway?`)) return;
+      }
+    }
+
     setSaving(true);
     setMsg('');
 
-    const { error: saleErr } = await supabase.from('sales').insert({
+    const items = cart.map(c => ({ id: c.id, name: c.name, price: c.price, qty: c.qty, cat: c.cat }));
+    const salePayload = {
       shop_id: profile.shop_id,
       staff_id: profile.id,
       date: todayStr(),
       time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-      items: cart.map(c => ({ id: c.id, name: c.name, price: c.price, qty: c.qty, cat: c.cat })),
-      sub: cartTotal,
-      disc: 0,
+      items,
+      sub,
+      disc: parseInt(disc) || 0,
       total: cartTotal,
       pay: payMode,
-    });
+    };
+    if (payMode === 'split') {
+      salePayload.sp_u = parseInt(spU) || 0;
+      salePayload.sp_c = parseInt(spC) || 0;
+    }
 
+    const { error: saleErr } = await supabase.from('sales').insert(salePayload);
     if (saleErr) {
       setSaving(false);
       setMsg('Could not save sale: ' + saleErr.message);
       return;
+    }
+
+    // Credit sale: also write to the credits ledger so it shows up on the
+    // Credit page's Accounts/Ledger tabs — this is the piece that was missing.
+    if (payMode === 'credit') {
+      const ok = await addCreditSale(supabase, profile.shop_id, {
+        name: crName.trim(), phone: crPhone.trim(), amt: cartTotal, items, date: todayStr(),
+      });
+      if (!ok) setMsg('⚠ Sale saved, but credit ledger entry failed — check manually');
     }
 
     // Deduct stock for each item sold. Done as separate updates (not a single
@@ -99,8 +156,10 @@ export default function ShopPage() {
 
     await loadProducts(profile.shop_id);
     setCart([]);
+    setDisc(0);
+    resetPaymentFields();
     setSaving(false);
-    setMsg('✅ Sale saved — ' + fmt(cartTotal));
+    if (!msg) setMsg('✅ Sale saved — ' + fmt(cartTotal));
     setTimeout(() => setMsg(''), 3000);
   }
 
@@ -112,16 +171,20 @@ export default function ShopPage() {
   if (loading) return <Centered>Loading…</Centered>;
 
   return (
-    <div style={{ maxWidth: 480, margin: '0 auto', padding: 12, paddingBottom: 140 }}>
+    <div style={{ maxWidth: 480, margin: '0 auto', padding: 12, paddingBottom: 240 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 4px' }}>
         <div>
           <div style={{ fontWeight: 800, fontSize: 16 }}>{shop?.name || 'Shop'}</div>
           <div style={{ fontSize: 12, color: colors.sub }}>{profile?.full_name}</div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button style={{ ...btnOutline, padding: '8px 12px', fontSize: 12 }} onClick={() => router.push('/shop/stock')}>📦 Stock</button>
-          <button style={{ ...btnOutline, padding: '8px 12px', fontSize: 12 }} onClick={handleLogout}>Logout</button>
-        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+        <NavBtn onClick={() => router.push('/shop/stock')}>📦 Stock</NavBtn>
+        <NavBtn onClick={() => router.push('/shop/cash')}>💵 Cash</NavBtn>
+        <NavBtn onClick={() => router.push('/shop/credit')}>📒 Credit</NavBtn>
+        <NavBtn onClick={() => router.push('/shop/eod')}>🌙 EOD</NavBtn>
+        <NavBtn onClick={handleLogout}>Logout</NavBtn>
       </div>
 
       {msg && (
@@ -158,7 +221,7 @@ export default function ShopPage() {
       <div style={{
         position: 'fixed', bottom: 0, left: 0, right: 0,
         background: colors.card, borderTop: `1px solid ${colors.border}`,
-        padding: 12, maxWidth: 480, margin: '0 auto',
+        padding: 12, maxWidth: 480, margin: '0 auto', maxHeight: '70vh', overflowY: 'auto',
       }}>
         {cart.length > 0 && (
           <div style={{ maxHeight: 140, overflowY: 'auto', marginBottom: 8 }}>
@@ -173,16 +236,25 @@ export default function ShopPage() {
                 </div>
               </div>
             ))}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderTop: `1px solid ${colors.border}`, marginTop: 4 }}>
+              <span style={{ fontSize: 12, color: colors.sub }}>Discount</span>
+              <input
+                type="number" min="0" placeholder="0"
+                style={{ ...input, width: 80, marginBottom: 0, textAlign: 'right' }}
+                value={disc || ''}
+                onChange={e => setDisc(e.target.value)}
+              />
+            </div>
           </div>
         )}
 
         <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-          {['cash', 'upi', 'card', 'credit'].map(m => (
+          {PAY_MODES.map(m => (
             <button
               key={m}
               onClick={() => setPayMode(m)}
               style={{
-                ...btnOutline, flex: 1, padding: '8px 4px', fontSize: 12, textTransform: 'uppercase',
+                ...btnOutline, flex: 1, padding: '8px 4px', fontSize: 11, textTransform: 'uppercase',
                 background: payMode === m ? colors.gold : 'transparent',
                 color: payMode === m ? '#2a1d00' : colors.text,
                 borderColor: payMode === m ? colors.gold : colors.border,
@@ -193,6 +265,25 @@ export default function ShopPage() {
           ))}
         </div>
 
+        {payMode === 'credit' && (
+          <div style={{ marginBottom: 8 }}>
+            <input style={{ ...input, marginBottom: 6 }} placeholder="Customer name *" value={crName} onChange={e => setCrName(e.target.value)} />
+            <input style={{ ...input, marginBottom: 4 }} placeholder="Phone (recommended)" value={crPhone} onChange={e => handlePhoneChange(e.target.value)} />
+            {crHint && (
+              <div style={{ fontSize: 12, color: crHint.balance > 0 ? colors.red : colors.green, marginBottom: 4 }}>
+                {crHint.balance > 0 ? `⚠️ Existing customer — already owes ${fmt(crHint.balance)}` : '✓ Existing customer — no balance due'}
+              </div>
+            )}
+          </div>
+        )}
+
+        {payMode === 'split' && (
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <input style={{ ...input, marginBottom: 0 }} type="number" placeholder="UPI amount" value={spU} onChange={e => setSpU(e.target.value)} />
+            <input style={{ ...input, marginBottom: 0 }} type="number" placeholder="Cash amount" value={spC} onChange={e => setSpC(e.target.value)} />
+          </div>
+        )}
+
         <button
           style={{ ...btnPrimary, width: '100%' }}
           disabled={!cart.length || saving}
@@ -202,6 +293,14 @@ export default function ShopPage() {
         </button>
       </div>
     </div>
+  );
+}
+
+function NavBtn({ onClick, children }) {
+  return (
+    <button style={{ ...btnOutline, padding: '8px 12px', fontSize: 12 }} onClick={onClick}>
+      {children}
+    </button>
   );
 }
 
