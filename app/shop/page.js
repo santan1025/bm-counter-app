@@ -118,7 +118,10 @@ export default function ShopPage() {
           <div style={{ fontWeight: 800, fontSize: 16 }}>{shop?.name || 'Shop'}</div>
           <div style={{ fontSize: 12, color: colors.sub }}>{profile?.full_name}</div>
         </div>
-        <button style={{ ...btnOutline, padding: '8px 12px', fontSize: 12 }} onClick={handleLogout}>Logout</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button style={{ ...btnOutline, padding: '8px 12px', fontSize: 12 }} onClick={() => router.push('/shop/stock')}>📦 Stock</button>
+          <button style={{ ...btnOutline, padding: '8px 12px', fontSize: 12 }} onClick={handleLogout}>Logout</button>
+        </div>
       </div>
 
       {msg && (
