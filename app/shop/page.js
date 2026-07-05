@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase';
 import { getMyProfile, fmt, todayStr } from '@/lib/helpers';
@@ -21,6 +21,10 @@ export default function ShopPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
+
+  // Browse/filter state
+  const [search, setSearch] = useState('');
+  const [activeCat, setActiveCat] = useState('All');
 
   // Credit fields
   const [crName, setCrName] = useState('');
@@ -57,15 +61,18 @@ export default function ShopPage() {
     setProducts(data || []);
   }
 
-  function addToCart(p) {
+  function addToCart(p, qtyDelta = 1) {
     setCart(prev => {
       const i = prev.findIndex(c => c.id === p.id);
       if (i >= 0) {
         const next = [...prev];
-        next[i] = { ...next[i], qty: next[i].qty + 1 };
+        const newQty = next[i].qty + qtyDelta;
+        if (newQty <= 0) return next.filter(c => c.id !== p.id);
+        next[i] = { ...next[i], qty: newQty };
         return next;
       }
-      return [...prev, { id: p.id, name: p.name, price: p.price, cat: p.category, qty: 1 }];
+      if (qtyDelta <= 0) return prev;
+      return [...prev, { id: p.id, name: p.name, price: p.price, cat: p.category, qty: qtyDelta }];
     });
   }
 
@@ -75,8 +82,29 @@ export default function ShopPage() {
       .filter(c => c.qty > 0));
   }
 
+  function qtyInCart(id) {
+    return cart.find(c => c.id === id)?.qty || 0;
+  }
+
   const sub = cart.reduce((a, c) => a + c.price * c.qty, 0);
   const cartTotal = Math.max(0, sub - (parseInt(disc) || 0));
+
+  const quickAddItems = useMemo(() => products.filter(p => p.is_quick_add).slice(0, 6), [products]);
+
+  const categories = useMemo(() => {
+    const cats = [...new Set(products.map(p => p.category).filter(Boolean))];
+    return ['All', ...cats];
+  }, [products]);
+
+  const filteredProducts = useMemo(() => {
+    let list = products;
+    if (activeCat !== 'All') list = list.filter(p => p.category === activeCat);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(p => p.name.toLowerCase().includes(q));
+    }
+    return list;
+  }, [products, activeCat, search]);
 
   // As staff types a phone number for a credit sale, warn if this customer
   // already has an outstanding balance — same as v15's lookupCreditCustomer.
@@ -136,7 +164,7 @@ export default function ShopPage() {
     }
 
     // Credit sale: also write to the credits ledger so it shows up on the
-    // Credit page's Accounts/Ledger tabs — this is the piece that was missing.
+    // Credit page's Accounts/Ledger tabs.
     if (payMode === 'credit') {
       const ok = await addCreditSale(supabase, profile.shop_id, {
         name: crName.trim(), phone: crPhone.trim(), amt: cartTotal, items, date: todayStr(),
@@ -183,6 +211,7 @@ export default function ShopPage() {
         <NavBtn onClick={() => router.push('/shop/stock')}>📦 Stock</NavBtn>
         <NavBtn onClick={() => router.push('/shop/cash')}>💵 Cash</NavBtn>
         <NavBtn onClick={() => router.push('/shop/credit')}>📒 Credit</NavBtn>
+        <NavBtn onClick={() => router.push('/shop/expenses')}>🧾 Expenses</NavBtn>
         <NavBtn onClick={() => router.push('/shop/eod')}>🌙 EOD</NavBtn>
         <NavBtn onClick={handleLogout}>Logout</NavBtn>
       </div>
@@ -193,26 +222,70 @@ export default function ShopPage() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-        {products.map(p => (
+      {quickAddItems.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: colors.sub, textTransform: 'uppercase', marginBottom: 6 }}>⚡ Quick Add</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            {quickAddItems.map(p => (
+              <button
+                key={p.id}
+                onClick={() => addToCart(p, 1)}
+                style={{ ...card, marginBottom: 0, textAlign: 'center', cursor: 'pointer', padding: '10px 6px' }}
+              >
+                <div style={{ fontWeight: 700, fontSize: 13 }}>{p.name}</div>
+                <div style={{ fontSize: 12, color: colors.gold, fontWeight: 700 }}>{fmt(p.price)}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <input
+        style={{ ...input, marginTop: 10 }}
+        placeholder="🔍 Search product…"
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+      />
+
+      <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 4, marginBottom: 8 }}>
+        {categories.map(c => (
           <button
-            key={p.id}
-            onClick={() => addToCart(p)}
-            style={{ ...card, marginBottom: 0, textAlign: 'left', cursor: 'pointer', border: `1px solid ${colors.border}` }}
+            key={c}
+            onClick={() => setActiveCat(c)}
+            style={{
+              padding: '6px 12px', borderRadius: 20, border: `1px solid ${colors.border}`,
+              background: activeCat === c ? colors.gold : 'transparent',
+              color: activeCat === c ? '#2a1d00' : colors.text,
+              fontWeight: 700, fontSize: 12, whiteSpace: 'nowrap', cursor: 'pointer', flexShrink: 0,
+            }}
           >
-            <div style={{ fontWeight: 700, fontSize: 14 }}>{p.name}</div>
-            <div style={{ fontSize: 11, color: colors.sub }}>{p.category}</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
-              <span style={{ fontWeight: 800, color: colors.gold }}>{fmt(p.price)}</span>
-              <span style={{ fontSize: 12, color: p.stock <= 0 ? colors.red : colors.sub }}>
-                {p.stock} left
-              </span>
-            </div>
+            {c}
           </button>
         ))}
-        {!products.length && (
-          <div style={{ gridColumn: '1 / -1', color: colors.sub, textAlign: 'center', padding: 20 }}>
-            No products yet for this shop. Add some in Supabase → Table Editor → products.
+      </div>
+
+      <div style={card}>
+        {filteredProducts.map(p => {
+          const inCart = qtyInCart(p.id);
+          return (
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: `1px solid ${colors.border}` }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>
+                  {p.name}{p.stock <= (p.reorder_level || 3) && <span style={{ marginLeft: 6, fontSize: 10, color: colors.red, fontWeight: 800 }}>LOW</span>}
+                </div>
+                <div style={{ fontSize: 11, color: colors.sub }}>{p.category} · {fmt(p.price)} · stk:{p.stock}</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button style={{ ...btnOutline, padding: '4px 10px' }} onClick={() => addToCart(p, -1)}>−</button>
+                <span style={{ minWidth: 18, textAlign: 'center', fontWeight: 700 }}>{inCart}</span>
+                <button style={{ ...btnOutline, padding: '4px 10px' }} onClick={() => addToCart(p, 1)}>+</button>
+              </div>
+            </div>
+          );
+        })}
+        {!filteredProducts.length && (
+          <div style={{ textAlign: 'center', color: colors.sub, padding: 20 }}>
+            {products.length ? 'No products match your search/filter.' : 'No products yet for this shop. Add some in Manage → Add Product.'}
           </div>
         )}
       </div>
